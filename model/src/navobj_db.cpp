@@ -850,18 +850,18 @@ bool NavObj_dB::InsertTrack(Track* track) {
 };
 
 bool NavObj_dB::UpdateTrack(Track* track) {
-  bool rv = false;
-  char* errMsg = 0;
-
   if (!TrackExists(m_db, track->m_GUID.ToStdString())) return false;
 
-  sqlite3_exec(m_db, "BEGIN TRANSACTION", 0, 0, &errMsg);
-  if (errMsg) {
+  if (sqlite3_exec(m_db, "BEGIN TRANSACTION", nullptr, nullptr, nullptr) !=
+      SQLITE_OK) {
     ReportError("UpdateTrack:BEGIN TRANSACTION");
     return false;
   }
 
-  UpdateDBTrackAttributes(track);
+  if (!UpdateDBTrackAttributes(track)) {
+    sqlite3_exec(m_db, "ROLLBACK", nullptr, nullptr, nullptr);
+    return false;
+  }
 
   // Delete and re-add track points
   const char* sql = "DELETE FROM trk_points WHERE track_guid = ?";
@@ -871,13 +871,13 @@ bool NavObj_dB::UpdateTrack(Track* track) {
                       SQLITE_TRANSIENT);
   } else {
     ReportError("UpdateTrack:prepare");
-    sqlite3_exec(m_db, "COMMIT", 0, 0, &errMsg);
+    sqlite3_exec(m_db, "ROLLBACK", nullptr, nullptr, nullptr);
     return false;
   }
   if (sqlite3_step(stmt) != SQLITE_DONE) {
     ReportError("UpdateTrack:step");
     sqlite3_finalize(stmt);
-    sqlite3_exec(m_db, "COMMIT", 0, 0, &errMsg);
+    sqlite3_exec(m_db, "ROLLBACK", nullptr, nullptr, nullptr);
     return false;
   }
   sqlite3_finalize(stmt);
@@ -886,17 +886,20 @@ bool NavObj_dB::UpdateTrack(Track* track) {
   for (int i = 0; i < track->GetnPoints(); i++) {
     auto point = track->GetPoint(i);
     //  Add the bare point
-    if (point) {
-      InsertTrackPoint(m_db, track->m_GUID.ToStdString(), point->m_lat,
-                       point->m_lon, point->GetTimeString(), i);
+    if (point && !InsertTrackPoint(m_db, track->m_GUID.ToStdString(),
+                                   point->m_lat, point->m_lon,
+                                   point->GetTimeString(), i)) {
+      sqlite3_exec(m_db, "ROLLBACK", nullptr, nullptr, nullptr);
+      return false;
     }
   }
 
-  sqlite3_exec(m_db, "COMMIT", 0, 0, nullptr);
-
-  rv = true;
-  if (errMsg) rv = false;
-  return rv;
+  if (sqlite3_exec(m_db, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) {
+    ReportError("UpdateTrack:COMMIT");
+    sqlite3_exec(m_db, "ROLLBACK", nullptr, nullptr, nullptr);
+    return false;
+  }
+  return true;
 };
 
 bool NavObj_dB::UpdateDBTrackAttributes(Track* track) {
